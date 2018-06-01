@@ -26,6 +26,7 @@ class TestSwiftBridgedArray(TestBase):
 
     @decorators.skipUnlessDarwin
     @decorators.swiftTest
+    @decorators.expectedFailureAll(bugnumber="<rdar://problem/32024572>")
     def test_swift_bridged_array(self):
         """Check formatting for Swift.Array<T> that are bridged from ObjC"""
         self.build()
@@ -39,7 +40,7 @@ class TestSwiftBridgedArray(TestBase):
     def do_test(self):
         """Check formatting for Swift.Array<T> that are bridged from ObjC"""
         exe_name = "a.out"
-        exe = os.path.join(os.getcwd(), exe_name)
+        exe = self.getBuildArtifact(exe_name)
 
         # Create the target
         target = self.dbg.CreateTarget(exe)

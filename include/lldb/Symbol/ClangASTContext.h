@@ -25,15 +25,16 @@
 
 // Other libraries and framework includes
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/ExternalASTMerger.h"
 #include "clang/AST/TemplateBase.h"
 #include "llvm/ADT/SmallVector.h"
 
 // Project includes
 #include "Plugins/ExpressionParser/Clang/ClangPersistentVariables.h"
 #include "lldb/Core/ClangForward.h"
-#include "lldb/Core/ConstString.h"
 #include "lldb/Symbol/CompilerType.h"
 #include "lldb/Symbol/TypeSystem.h"
+#include "lldb/Utility/ConstString.h"
 #include "lldb/lldb-enumerations.h"
 
 class DWARFASTParserClang;
@@ -260,6 +261,9 @@ public:
           &type_fields,
       bool packed = false);
 
+  static bool IsOperator(const char *name,
+                         clang::OverloadedOperatorKind &op_kind);
+
   //------------------------------------------------------------------
   // Structure, Unions, Classes
   //------------------------------------------------------------------
@@ -288,17 +292,16 @@ public:
     bool IsValid() const {
       if (args.empty())
         return false;
-      return args.size() == names.size();
-    }
-
-    size_t GetSize() const {
-      if (IsValid())
-        return args.size();
-      return 0;
+      return args.size() == names.size() &&
+        ((bool)pack_name == (bool)packed_args) &&
+        (!packed_args || !packed_args->packed_args);
     }
 
     llvm::SmallVector<const char *, 2> names;
     llvm::SmallVector<clang::TemplateArgument, 2> args;
+    
+    const char * pack_name = nullptr;
+    std::unique_ptr<TemplateParameterInfos> packed_args;
   };
 
   clang::FunctionTemplateDecl *
@@ -314,6 +317,9 @@ public:
   CreateClassTemplateDecl(clang::DeclContext *decl_ctx,
                           lldb::AccessType access_type, const char *class_name,
                           int kind, const TemplateParameterInfos &infos);
+
+  clang::TemplateTemplateParmDecl *
+  CreateTemplateTemplateParmDecl(const char *template_name);
 
   clang::ClassTemplateSpecializationDecl *CreateClassTemplateSpecializationDecl(
       clang::DeclContext *decl_ctx,
@@ -410,7 +416,8 @@ public:
   CompilerType CreateEnumerationType(const char *name,
                                      clang::DeclContext *decl_ctx,
                                      const Declaration &decl,
-                                     const CompilerType &integer_qual_type);
+                                     const CompilerType &integer_qual_type,
+                                     bool is_scoped);
 
   //------------------------------------------------------------------
   // Integer type functions
@@ -807,9 +814,14 @@ public:
 
   size_t GetNumTemplateArguments(lldb::opaque_compiler_type_t type) override;
 
-  CompilerType GetTemplateArgument(lldb::opaque_compiler_type_t type,
-                                   size_t idx,
-                                   lldb::TemplateArgumentKind &kind) override;
+  lldb::TemplateArgumentKind
+  GetTemplateArgumentKind(lldb::opaque_compiler_type_t type,
+                          size_t idx) override;
+  CompilerType GetTypeTemplateArgument(lldb::opaque_compiler_type_t type,
+                                       size_t idx) override;
+  llvm::Optional<CompilerType::IntegralTemplateArgument>
+  GetIntegralTemplateArgument(lldb::opaque_compiler_type_t type,
+                              size_t idx) override;
 
   CompilerType GetTypeForFormatters(void *type) override;
 
@@ -992,8 +1004,14 @@ public:
 
   clang::DeclarationName
   GetDeclarationName(const char *name, const CompilerType &function_clang_type);
-
+  
+  virtual const clang::ExternalASTMerger::OriginMap &GetOriginMap() {
+    return m_origins;
+  }
 protected:
+  const clang::ClassTemplateSpecializationDecl *
+  GetAsTemplateSpecialization(lldb::opaque_compiler_type_t type);
+
   //------------------------------------------------------------------
   // Classes that inherit from ClangASTContext can see and modify these
   //------------------------------------------------------------------
@@ -1018,6 +1036,7 @@ protected:
     CompleteTagDeclCallback                         m_callback_tag_decl;
     CompleteObjCInterfaceDeclCallback               m_callback_objc_decl;
     void *                                          m_callback_baton;
+    clang::ExternalASTMerger::OriginMap             m_origins;
     uint32_t                                        m_pointer_byte_size;
     bool                                            m_ast_owned;
     bool                                            m_can_evaluate_expressions;
@@ -1051,7 +1070,12 @@ public:
                                       const char *name) override;
 
   PersistentExpressionState *GetPersistentExpressionState() override;
-
+  
+  clang::ExternalASTMerger &GetMergerUnchecked();
+  
+  const clang::ExternalASTMerger::OriginMap &GetOriginMap() override {
+    return GetMergerUnchecked().GetOrigins();
+  }
 private:
   lldb::TargetWP m_target_wp;
   lldb::ClangPersistentVariablesUP m_persistent_variables; ///< These are the

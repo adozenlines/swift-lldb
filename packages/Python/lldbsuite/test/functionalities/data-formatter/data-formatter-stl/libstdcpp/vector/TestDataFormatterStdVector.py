@@ -25,10 +25,11 @@ class StdVectorDataFormatterTestCase(TestBase):
 
     @skipIfFreeBSD
     @skipIfWindows  # libstdcpp not ported to Windows
+    @skipIfwatchOS  # libstdcpp not ported to watchos
     def test_with_run_command(self):
         """Test that that file and class static variables display correctly."""
         self.build()
-        self.runCmd("file a.out", CURRENT_EXECUTABLE_SET)
+        self.runCmd("file " + self.getBuildArtifact("a.out"), CURRENT_EXECUTABLE_SET)
 
         lldbutil.run_break_set_by_source_regexp(
             self, "Set break point at this line.")

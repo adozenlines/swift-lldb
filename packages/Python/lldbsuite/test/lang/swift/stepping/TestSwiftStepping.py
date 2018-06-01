@@ -20,13 +20,12 @@ import os
 import platform
 import unittest2
 
-
 class TestSwiftStepping(lldbtest.TestBase):
 
     mydir = lldbtest.TestBase.compute_mydir(__file__)
 
     @decorators.swiftTest
-    @decorators.expectedFailureAll(bugnumber="rdar://31515444")
+    @decorators.add_test_categories(["swiftpr"])
     def test_swift_stepping(self):
         """Tests that we can step reliably in swift code."""
         self.build()
@@ -74,7 +73,7 @@ class TestSwiftStepping(lldbtest.TestBase):
     def do_test(self):
         """Tests that we can step reliably in swift code."""
         exe_name = "a.out"
-        exe = os.path.join(os.getcwd(), exe_name)
+        exe = self.getBuildArtifact(exe_name)
 
         # Create the target
         target = self.dbg.CreateTarget(exe)
@@ -123,6 +122,9 @@ class TestSwiftStepping(lldbtest.TestBase):
         thread.StepOver()
 
         self.hit_correct_line(thread, "Step over the if should get here")
+
+        thread.StepOver()
+        self.hit_correct_line(thread, "Step over the print should get here.")
 
         thread.StepOver()
         self.hit_correct_line(thread, "Stop here to step into B constructor.")
@@ -185,17 +187,9 @@ class TestSwiftStepping(lldbtest.TestBase):
         thread.StepOver()
         self.hit_correct_line(thread, "At point initializer.")
         thread.StepOver()
-        # Due to: <rdar://problem/15888936> we will stop inside the
-        # switch statement instead of at the switch:
-        # self.hit_correct_line (thread, "At the beginning of the switch.")
-        self.hit_correct_line(thread, "case (0, 0):")
+        self.hit_correct_line (thread, "At the beginning of the switch.")
 
         thread.StepOver()
-        self.hit_correct_line(thread, "case (_, 0):")
-        thread.StepInto()
-        self.hit_correct_line(thread, "case (0, _):")
-        thread.StepOver()
-
         stopped_at_case = self.hit_correct_line(
             thread, "case (let x, let y) where", False)
         if stopped_at_case:
@@ -289,11 +283,22 @@ class TestSwiftStepping(lldbtest.TestBase):
         # Step out of the protocol function, one step out should also
         # get us past any dispatch thunk.
         thread.StepOut()
-        self.hit_correct_line(thread, "indirect.protocol_func(20)")
+        stop_on_caller = self.hit_correct_line(thread, "indirect.protocol_func(20)", False)
+        stop_at_cd_maker = self.hit_correct_line(thread, "var cd_maker", False)
 
-        # And one step over is necessary because step out doesn't
+        # In swift-4.0 U before, one step over is necessary because step out doesn't
         # finish off the line.
-        thread.StepOver()
+        # In swift-4.1 we now step over the line but we also stop on the "var cd_maker"
+        # line, which we didn't with swift-4.0.  So we check for either of these.
+
+        if stop_on_caller or stop_at_cd_maker:
+            thread.StepOver()
+
+        # Step over the assignment.
+        stop_on_partial_apply = self.hit_correct_line(thread, "var cd_maker =", False)
+        if stop_on_partial_apply:
+            thread.StepOver()
+
         self.hit_correct_line(thread, "doSomethingWithFunction(cd_maker, 10)")
 
         thread.StepInto()

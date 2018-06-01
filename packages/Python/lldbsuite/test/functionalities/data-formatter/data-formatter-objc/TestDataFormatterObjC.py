@@ -97,7 +97,7 @@ class ObjCDataFormatterTestCase(TestBase):
 
     def plain_data_formatter_commands(self):
         """Test basic ObjC formatting behavior."""
-        self.runCmd("file a.out", CURRENT_EXECUTABLE_SET)
+        self.runCmd("file " + self.getBuildArtifact("a.out"), CURRENT_EXECUTABLE_SET)
 
         lldbutil.run_break_set_by_file_and_line(
             self, "main.m", self.line, num_expected_locations=1, loc_exact=True)
@@ -163,7 +163,7 @@ class ObjCDataFormatterTestCase(TestBase):
 
     def appkit_common_data_formatters_command(self):
         """Test formatters for AppKit classes."""
-        self.runCmd("file a.out", CURRENT_EXECUTABLE_SET)
+        self.runCmd("file " + self.getBuildArtifact("a.out"), CURRENT_EXECUTABLE_SET)
 
         lldbutil.run_break_set_by_file_and_line(
             self, "main.m", self.line, num_expected_locations=1, loc_exact=True)
@@ -187,15 +187,28 @@ class ObjCDataFormatterTestCase(TestBase):
 
     def nsnumber_data_formatter_commands(self):
         # Now enable AppKit and check we are displaying Cocoa classes correctly
-        self.expect('frame variable num1 num2 num3 num4 num5 num6 num7 num9',
+        self.expect('frame variable num1 num2 num3 num5 num6 num7 num8_Y num8_N num9',
                     substrs=['(NSNumber *) num1 = ', ' (int)5',
                              '(NSNumber *) num2 = ', ' (float)3.1',
                              '(NSNumber *) num3 = ', ' (double)3.14',
-                             '(NSNumber *) num4 = ', ' (long)-2',
                              '(NSNumber *) num5 = ', ' (char)65',
                              '(NSNumber *) num6 = ', ' (long)255',
                              '(NSNumber *) num7 = ', '2000000',
+                             '(NSNumber *) num8_Y = ', 'YES',
+                             '(NSNumber *) num8_N = ', 'NO',
                              '(NSNumber *) num9 = ', ' (short)-31616'])
+
+
+        self.runCmd('frame variable num4', check=True)
+        output = self.res.GetOutput()
+        i128_handled_correctly = False
+
+        if output.find('long') >= 0:
+            i128_handled_correctly = (output.find('(long)-2') >= 0)
+        if output.find('int128_t') >= 0:
+            i128_handled_correctly = (output.find('(int128_t)18446744073709551614') >= 0) # deliberately broken, should be ..14
+
+        self.assertTrue(i128_handled_correctly, "Expected valid output for int128_t; got " + output)
 
         self.expect('frame variable num_at1 num_at2 num_at3 num_at4',
                     substrs=['(NSNumber *) num_at1 = ', ' (int)12',
@@ -233,7 +246,7 @@ class ObjCDataFormatterTestCase(TestBase):
 
     def nsdata_data_formatter_commands(self):
         self.expect(
-            'frame variable immutableData mutableData data_ref mutable_data_ref mutable_string_ref',
+            'frame variable immutableData mutableData data_ref mutable_data_ref mutable_string_ref concreteData concreteMutableData',
             substrs=[
                 '(NSData *) immutableData = ',
                 ' 4 bytes',
@@ -244,7 +257,12 @@ class ObjCDataFormatterTestCase(TestBase):
                 '(CFMutableDataRef) mutable_data_ref = ',
                 '@"5 bytes"',
                 '(CFMutableStringRef) mutable_string_ref = ',
-                ' @"Wish ya knew"'])
+                ' @"Wish ya knew"',
+                '(NSData *) concreteData = ',
+                ' 100000 bytes',
+                '(NSMutableData *) concreteMutableData = ',
+                ' 100000 bytes'])
+
 
     def nsurl_data_formatter_commands(self):
         self.expect(
@@ -350,7 +368,7 @@ class ObjCDataFormatterTestCase(TestBase):
 
     def expr_objc_data_formatter_commands(self):
         """Test common cases of expression parser <--> formatters interaction."""
-        self.runCmd("file a.out", CURRENT_EXECUTABLE_SET)
+        self.runCmd("file " + self.getBuildArtifact("a.out"), CURRENT_EXECUTABLE_SET)
 
         lldbutil.run_break_set_by_file_and_line(
             self, "main.m", self.line, num_expected_locations=1, loc_exact=True)
@@ -398,7 +416,7 @@ class ObjCDataFormatterTestCase(TestBase):
 
     def cf_data_formatter_commands(self):
         """Test formatters for Core OSX frameworks."""
-        self.runCmd("file a.out", CURRENT_EXECUTABLE_SET)
+        self.runCmd("file " + self.getBuildArtifact("a.out"), CURRENT_EXECUTABLE_SET)
 
         lldbutil.run_break_set_by_file_and_line(
             self, "main.m", self.line, num_expected_locations=1, loc_exact=True)
@@ -453,7 +471,7 @@ class ObjCDataFormatterTestCase(TestBase):
 
     def kvo_data_formatter_commands(self):
         """Test the behavior of formatters when KVO is in use."""
-        self.runCmd("file a.out", CURRENT_EXECUTABLE_SET)
+        self.runCmd("file " + self.getBuildArtifact("a.out"), CURRENT_EXECUTABLE_SET)
 
         lldbutil.run_break_set_by_file_and_line(
             self, "main.m", self.line, num_expected_locations=1, loc_exact=True)

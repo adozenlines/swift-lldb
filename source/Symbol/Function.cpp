@@ -134,22 +134,29 @@ size_t InlineFunctionInfo::MemorySize() const {
 //----------------------------------------------------------------------
 Function::Function(CompileUnit *comp_unit, lldb::user_id_t func_uid,
                    lldb::user_id_t type_uid, const Mangled &mangled, Type *type,
-                   const AddressRange &range)
+                   const AddressRange &range, bool canThrow)
     : UserID(func_uid), m_comp_unit(comp_unit), m_type_uid(type_uid),
       m_type(type), m_mangled(mangled), m_block(func_uid), m_range(range),
       m_frame_base(nullptr), m_flags(), m_prologue_byte_size(0) {
   m_block.SetParentScope(this);
+  if (canThrow)
+    m_flags.Set(flagsFunctionCanThrow);
+    
   assert(comp_unit != nullptr);
 }
 
 Function::Function(CompileUnit *comp_unit, lldb::user_id_t func_uid,
                    lldb::user_id_t type_uid, const char *mangled, Type *type,
-                   const AddressRange &range)
+                   const AddressRange &range, bool canThrow)
     : UserID(func_uid), m_comp_unit(comp_unit), m_type_uid(type_uid),
       m_type(type), m_mangled(ConstString(mangled), true), m_block(func_uid),
       m_range(range), m_frame_base(nullptr), m_flags(),
       m_prologue_byte_size(0) {
   m_block.SetParentScope(this);
+
+  if (canThrow)
+    m_flags.Set(flagsFunctionCanThrow);
+
   assert(comp_unit != nullptr);
 }
 
@@ -228,12 +235,15 @@ const CompileUnit *Function::GetCompileUnit() const { return m_comp_unit; }
 
 void Function::GetDescription(Stream *s, lldb::DescriptionLevel level,
                               Target *target) {
-  Type *func_type = GetType();
-  const char *name = func_type ? func_type->GetName().AsCString() : "<unknown>";
+  ConstString name = GetName();
+  ConstString mangled = m_mangled.GetMangledName();
 
-  *s << "id = " << (const UserID &)*this << ", name = \"" << name
-     << "\", range = ";
-
+  *s << "id = " << (const UserID &)*this;
+  if (name)
+    *s << ", name = \"" << name.GetCString() << '"';
+  if (mangled)
+    *s << ", mangled = \"" << mangled.GetCString() << '"';
+  *s << ", range = ";
   Address::DumpStyle fallback_style;
   if (level == eDescriptionLevelVerbose)
     fallback_style = Address::DumpStyleModuleWithFileAddress;

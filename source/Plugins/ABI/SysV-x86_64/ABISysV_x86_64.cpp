@@ -13,13 +13,10 @@
 // C++ Includes
 // Other libraries and framework includes
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/Triple.h"
 
 // Project includes
-#include "lldb/Core/ConstString.h"
-#include "lldb/Core/DataExtractor.h"
-#include "lldb/Core/Error.h"
-#include "lldb/Core/Log.h"
 #include "lldb/Core/Module.h"
 #include "lldb/Core/PluginManager.h"
 #include "lldb/Core/RegisterValue.h"
@@ -33,6 +30,10 @@
 #include "lldb/Target/StackFrame.h"
 #include "lldb/Target/Target.h"
 #include "lldb/Target/Thread.h"
+#include "lldb/Utility/ConstString.h"
+#include "lldb/Utility/DataExtractor.h"
+#include "lldb/Utility/Log.h"
+#include "lldb/Utility/Status.h"
 
 using namespace lldb;
 using namespace lldb_private;
@@ -1093,11 +1094,11 @@ size_t ABISysV_x86_64::GetRedZoneSize() const { return 128; }
 //------------------------------------------------------------------
 
 ABISP
-ABISysV_x86_64::CreateInstance(const ArchSpec &arch) {
+ABISysV_x86_64::CreateInstance(lldb::ProcessSP process_sp, const ArchSpec &arch) {
   static ABISP g_abi_sp;
   if (arch.GetTriple().getArch() == llvm::Triple::x86_64) {
     if (!g_abi_sp)
-      g_abi_sp.reset(new ABISysV_x86_64);
+      g_abi_sp.reset(new ABISysV_x86_64(process_sp));
     return g_abi_sp;
   }
   return ABISP();
@@ -1152,7 +1153,7 @@ bool ABISysV_x86_64::PrepareTrivialCall(Thread &thread, addr_t sp,
 
   sp -= 8;
 
-  Error error;
+  Status error;
   const RegisterInfo *pc_reg_info =
       reg_ctx->GetRegisterInfo(eRegisterKindGeneric, LLDB_REGNUM_GENERIC_PC);
   const RegisterInfo *sp_reg_info =
@@ -1160,48 +1161,6 @@ bool ABISysV_x86_64::PrepareTrivialCall(Thread &thread, addr_t sp,
   ProcessSP process_sp(thread.GetProcess());
 
   RegisterValue reg_value;
-
-#if 0
-    // This code adds an extra frame so that we don't lose the function that we came from
-    // by pushing the PC and the FP and then writing the current FP to point to the FP value
-    // we just pushed. It is disabled for now until the stack backtracing code can be debugged.
-
-    // Save current PC
-    const RegisterInfo *fp_reg_info = reg_ctx->GetRegisterInfo (eRegisterKindGeneric, LLDB_REGNUM_GENERIC_FP);
-    if (reg_ctx->ReadRegister(pc_reg_info, reg_value))
-    {
-        if (log)
-            log->Printf("Pushing the current PC onto the stack: 0x%" PRIx64 ": 0x%" PRIx64, (uint64_t)sp, reg_value.GetAsUInt64());
-        
-        if (!process_sp->WritePointerToMemory(sp, reg_value.GetAsUInt64(), error))
-            return false;
-
-        sp -= 8;
-        
-        // Save current FP
-        if (reg_ctx->ReadRegister(fp_reg_info, reg_value))
-        {
-            if (log)
-                log->Printf("Pushing the current FP onto the stack: 0x%" PRIx64 ": 0x%" PRIx64, (uint64_t)sp, reg_value.GetAsUInt64());
-            
-            if (!process_sp->WritePointerToMemory(sp, reg_value.GetAsUInt64(), error))
-                return false;
-        }
-        // Setup FP backchain
-        reg_value.SetUInt64 (sp);
-        
-        if (log)
-            log->Printf("Writing FP:  0x%" PRIx64 " (for FP backchain)", reg_value.GetAsUInt64());
-
-        if (!reg_ctx->WriteRegister(fp_reg_info, reg_value))
-        {
-            return false;
-        }
-        
-        sp -= 8;
-    }
-#endif
-
   if (log)
     log->Printf("Pushing the return address onto the stack: 0x%" PRIx64
                 ": 0x%" PRIx64,
@@ -1246,7 +1205,7 @@ static bool ReadIntegerArgument(Scalar &scalar, unsigned int bit_width,
       scalar.SignExtend(bit_width);
   } else {
     uint32_t byte_size = (bit_width + (8 - 1)) / 8;
-    Error error;
+    Status error;
     if (thread.GetProcess()->ReadScalarIntegerFromMemory(
             current_stack_argument, byte_size, is_signed, scalar, error)) {
       current_stack_argument += byte_size;
@@ -1329,9 +1288,9 @@ bool ABISysV_x86_64::GetArgumentValues(Thread &thread,
   return true;
 }
 
-Error ABISysV_x86_64::SetReturnValueObject(lldb::StackFrameSP &frame_sp,
-                                           lldb::ValueObjectSP &new_value_sp) {
-  Error error;
+Status ABISysV_x86_64::SetReturnValueObject(lldb::StackFrameSP &frame_sp,
+                                            lldb::ValueObjectSP &new_value_sp) {
+  Status error;
   if (!new_value_sp) {
     error.SetErrorString("Empty value object for return value.");
     return error;
@@ -1357,7 +1316,7 @@ Error ABISysV_x86_64::SetReturnValueObject(lldb::StackFrameSP &frame_sp,
     const RegisterInfo *reg_info = reg_ctx->GetRegisterInfoByName("rax", 0);
 
     DataExtractor data;
-    Error data_error;
+    Status data_error;
     size_t num_bytes = new_value_sp->GetData(data, data_error);
     if (data_error.Fail()) {
       error.SetErrorStringWithFormat(
@@ -1386,7 +1345,7 @@ Error ABISysV_x86_64::SetReturnValueObject(lldb::StackFrameSP &frame_sp,
             reg_ctx->GetRegisterInfoByName("xmm0", 0);
         RegisterValue xmm0_value;
         DataExtractor data;
-        Error data_error;
+        Status data_error;
         size_t num_bytes = new_value_sp->GetData(data, data_error);
         if (data_error.Fail()) {
           error.SetErrorStringWithFormat(
@@ -1543,7 +1502,7 @@ ValueObjectSP ABISysV_x86_64::GetReturnValueObjectSimple(
             const ByteOrder byte_order = process_sp->GetByteOrder();
             RegisterValue reg_value;
             if (reg_ctx->ReadRegister(altivec_reg, reg_value)) {
-              Error error;
+              Status error;
               if (reg_value.GetAsMemoryData(
                       altivec_reg, heap_data_ap->GetBytes(),
                       heap_data_ap->GetByteSize(), byte_order, error)) {
@@ -1570,7 +1529,7 @@ ValueObjectSP ABISysV_x86_64::GetReturnValueObjectSimple(
               if (reg_ctx->ReadRegister(altivec_reg, reg_value) &&
                   reg_ctx->ReadRegister(altivec_reg2, reg_value2)) {
 
-                Error error;
+                Status error;
                 if (reg_value.GetAsMemoryData(
                         altivec_reg, heap_data_ap->GetBytes(),
                         altivec_reg->byte_size, byte_order, error) &&
@@ -1600,7 +1559,8 @@ ValueObjectSP ABISysV_x86_64::GetReturnValueObjectSimple(
 static bool ExtractBytesFromRegisters(
     ExecutionContext &exe_ctx, CompilerType &clang_type,
     const DataExtractor &rax_data, const DataExtractor &rdx_data,
-    const DataExtractor &rcx_data, const DataExtractor &xmm0_data,
+    const DataExtractor &rcx_data, const DataExtractor &r8_data,
+    const DataExtractor &xmm0_data,
     const DataExtractor &xmm1_data, const DataExtractor &xmm2_data,
     const ByteOrder byte_order, DataBufferSP &data_sp,
     uint32_t data_byte_offset, uint32_t &integer_bytes, uint32_t &fp_bytes,
@@ -1642,6 +1602,7 @@ static bool ExtractBytesFromRegisters(
 
     const DataExtractor *copy_from_extractor = NULL;
     uint32_t copy_from_offset = 0;
+    bool already_copied = false;
 
     const uint32_t field_type_flags = field_clang_type.GetTypeInfo();
     const bool is_swift_enum = (field_type_flags & eTypeIsEnumeration) &&
@@ -1662,32 +1623,52 @@ static bool ExtractBytesFromRegisters(
         (field_type_flags & eTypeInstanceIsPointer &&
          child_is_base_class == false) ||
         is_simple_swift_enum) {
-      if (integer_bytes < 8) {
-        if (integer_bytes + field_byte_width <= 8) {
-          // This is in RAX, copy from register to our result structure:
-          copy_from_extractor = &rax_data;
-          copy_from_offset = integer_bytes;
-          integer_bytes += field_byte_width;
-        } else {
-          // The next field wouldn't fit in the remaining space, so we pushed it
-          // to rdx.
-          copy_from_extractor = &rdx_data;
-          copy_from_offset = 0;
-          integer_bytes = 8 + field_byte_width;
-        }
-      } else if (integer_bytes + field_byte_width <= 16) {
-        copy_from_extractor = &rdx_data;
-        copy_from_offset = integer_bytes - 8;
-        integer_bytes += field_byte_width;
-      } else if (is_swift_type && (integer_bytes + field_byte_width <= 24)) {
-        copy_from_extractor = &rcx_data;
-        copy_from_offset = integer_bytes - 8;
-        integer_bytes += field_byte_width;
-      } else {
-        // The last field didn't fit.  I can't see how that would happen w/o
-        // the overall size being greater than 16 bytes.
-        return false;
-      }
+          if (integer_bytes < 8) {
+            if (integer_bytes + field_byte_width <= 8) {
+              // This is in RAX, copy from register to our result structure:
+              copy_from_extractor = &rax_data;
+              copy_from_offset = integer_bytes;
+              integer_bytes += field_byte_width;
+            } else {
+              // The next field wouldn't fit in the remaining space, so we
+              // pushed it to rdx.
+              copy_from_extractor = &rdx_data;
+              copy_from_offset = 0;
+              integer_bytes = 8 + field_byte_width;
+            }
+          } else if (integer_bytes < 16) {
+            if (integer_bytes + field_byte_width <= 16) {
+              copy_from_extractor = &rdx_data;
+              copy_from_offset = integer_bytes - 8;
+              integer_bytes += field_byte_width;
+            } else if (is_swift_type) {
+              // This one got pushed to rcx
+              copy_from_extractor = &rcx_data;
+              copy_from_offset = 0;
+              integer_bytes = 8 + field_byte_width;
+            }
+          } else if (is_swift_type && integer_bytes < 24) {
+            if (integer_bytes + field_byte_width <= 24) {
+              copy_from_extractor = &rcx_data;
+              copy_from_offset = integer_bytes - 16;
+              integer_bytes += field_byte_width;
+            } else {
+              // This one got pushed to r8:
+              copy_from_extractor = &r8_data;
+              copy_from_offset = 0;
+              integer_bytes = 16 + field_byte_width;
+            }
+          } else if (is_swift_type && integer_bytes + field_byte_width <= 32) {
+            copy_from_extractor = &r8_data;
+            copy_from_offset = integer_bytes - 24;
+            integer_bytes += field_byte_width;
+          } else {
+            // The last field didn't fit.  I can't see how that would happen w/o
+            // the overall size being
+            // greater than 16 bytes.  For now, return a nullptr return value
+            // object.
+            return false;
+          }
     } else if (field_type_flags & eTypeIsFloat ||
                field_type_flags & eTypeIsVector) {
       // Structs with long doubles are always passed in memory.
@@ -1784,24 +1765,29 @@ static bool ExtractBytesFromRegisters(
         return false;
 
       if (ExtractBytesFromRegisters(
-              exe_ctx, field_clang_type, rax_data, rdx_data, rcx_data,
+              exe_ctx, field_clang_type, rax_data, rdx_data, rcx_data, r8_data,
               xmm0_data, xmm1_data, xmm2_data, byte_order, data_sp,
               data_byte_offset + child_byte_offset, integer_bytes, fp_bytes,
               is_memory) == false) {
         return false;
+      } else {
+        already_copied = true;
       }
     }
 
     // These two tests are just sanity checks.  If I somehow get the
     // type calculation wrong above it is better to just return nothing
     // than to assert or crash.
-    if (copy_from_extractor &&
-        copy_from_offset + field_byte_width <=
-            copy_from_extractor->GetByteSize()) {
-      copy_from_extractor->CopyByteOrderedData(
-          copy_from_offset, field_byte_width,
-          data_sp->GetBytes() + field_byte_offset, field_byte_width,
-          byte_order);
+    if (!already_copied)
+    {
+      if (copy_from_extractor &&
+          copy_from_offset + field_byte_width <=
+              copy_from_extractor->GetByteSize()) {
+        copy_from_extractor->CopyByteOrderedData(
+            copy_from_offset, field_byte_width,
+            data_sp->GetBytes() + field_byte_offset, field_byte_width,
+            byte_order);
+      }
     }
   }
   return true;
@@ -1831,7 +1817,7 @@ ValueObjectSP ABISysV_x86_64::GetReturnValueObjectImpl(
         (return_compiler_type.GetTypeInfo() & eTypeIsSwift);
     uint32_t max_register_value_bit_width = 128;
     if (is_swift_type)
-      max_register_value_bit_width += 64;
+      max_register_value_bit_width += 128;
     if (bit_width <= max_register_value_bit_width) {
       const ArchSpec &arch = target->GetArchitecture();
       ByteOrder byte_order = arch.GetByteOrder();
@@ -1844,6 +1830,8 @@ ValueObjectSP ABISysV_x86_64::GetReturnValueObjectImpl(
           reg_ctx_sp->GetRegisterInfoByName("rdx", 0);
       const RegisterInfo *rcx_info =
           reg_ctx_sp->GetRegisterInfoByName("rcx", 0);
+      const RegisterInfo *r8_info =
+          reg_ctx_sp->GetRegisterInfoByName("r8", 0);
       const RegisterInfo *xmm0_info =
           reg_ctx_sp->GetRegisterInfoByName("xmm0", 0);
       const RegisterInfo *xmm1_info =
@@ -1854,12 +1842,14 @@ ValueObjectSP ABISysV_x86_64::GetReturnValueObjectImpl(
       RegisterValue rax_value;
       RegisterValue rdx_value;
       RegisterValue rcx_value;
+      RegisterValue r8_value;
       RegisterValue xmm0_value;
       RegisterValue xmm1_value;
       RegisterValue xmm2_value;
       reg_ctx_sp->ReadRegister(rax_info, rax_value);
       reg_ctx_sp->ReadRegister(rdx_info, rdx_value);
       reg_ctx_sp->ReadRegister(rcx_info, rcx_value);
+      reg_ctx_sp->ReadRegister(r8_info,  r8_value);
       reg_ctx_sp->ReadRegister(xmm0_info, xmm0_value);
       reg_ctx_sp->ReadRegister(xmm1_info, xmm1_value);
       reg_ctx_sp->ReadRegister(xmm2_info, xmm2_value);
@@ -1867,6 +1857,7 @@ ValueObjectSP ABISysV_x86_64::GetReturnValueObjectImpl(
       DataExtractor rax_data;
       DataExtractor rdx_data;
       DataExtractor rcx_data;
+      DataExtractor r8_data;
       DataExtractor xmm0_data;
       DataExtractor xmm1_data;
       DataExtractor xmm2_data;
@@ -1874,6 +1865,8 @@ ValueObjectSP ABISysV_x86_64::GetReturnValueObjectImpl(
       rax_value.GetData(rax_data);
       rdx_value.GetData(rdx_data);
       rcx_value.GetData(rcx_data);
+      r8_value.GetData(r8_data);
+      
       xmm0_value.GetData(xmm0_data);
       xmm1_value.GetData(xmm1_data);
       xmm2_value.GetData(xmm2_data);
@@ -1895,6 +1888,7 @@ ValueObjectSP ABISysV_x86_64::GetReturnValueObjectImpl(
         uint64_t field_bit_offset = 0;
         bool is_signed;
         bool is_complex;
+        bool already_copied = false;
         uint32_t count;
 
         CompilerType field_compiler_type = return_compiler_type.GetFieldAtIndex(
@@ -1973,9 +1967,31 @@ ValueObjectSP ABISysV_x86_64::GetReturnValueObjectImpl(
               copy_from_offset = 0;
               integer_bytes = 8 + field_byte_width;
             }
-          } else if (integer_bytes + field_byte_width <= 16) {
-            copy_from_extractor = &rdx_data;
-            copy_from_offset = integer_bytes - 8;
+          } else if (integer_bytes < 16) {
+            if (integer_bytes + field_byte_width <= 16) {
+              copy_from_extractor = &rdx_data;
+              copy_from_offset = integer_bytes - 8;
+              integer_bytes += field_byte_width;
+            } else if (is_swift_type) {
+              // This one got pushed to rcx
+              copy_from_extractor = &rcx_data;
+              copy_from_offset = 0;
+              integer_bytes = 8 + field_byte_width;
+            }
+          } else if (is_swift_type && integer_bytes < 24) {
+            if (integer_bytes + field_byte_width <= 24) {
+              copy_from_extractor = &rcx_data;
+              copy_from_offset = integer_bytes - 16;
+              integer_bytes += field_byte_width;
+            } else {
+              // This one got pushed to r8:
+              copy_from_extractor = &r8_data;
+              copy_from_offset = 0;
+              integer_bytes = 16 + field_byte_width;
+            }
+          } else if (is_swift_type && integer_bytes + field_byte_width <= 32) {
+            copy_from_extractor = &r8_data;
+            copy_from_offset = integer_bytes - 24;
             integer_bytes += field_byte_width;
           } else {
             // The last field didn't fit.  I can't see how that would happen w/o
@@ -2079,29 +2095,32 @@ ValueObjectSP ABISysV_x86_64::GetReturnValueObjectImpl(
             return return_valobj_sp;
 
           if (ExtractBytesFromRegisters(
-                  exe_ctx, field_compiler_type, rax_data, rdx_data, rcx_data,
+                  exe_ctx, field_compiler_type, rax_data, rdx_data, rcx_data, r8_data,
                   xmm0_data, xmm1_data, xmm2_data, byte_order, data_sp,
                   data_byte_offset + child_byte_offset, integer_bytes, fp_bytes,
                   is_memory) == false) {
             return return_valobj_sp;
           } else
             copy_from_extractor = &return_ext;
+            already_copied = true;
         }
 
+        if (!already_copied) {
         // These two tests are just sanity checks.  If I somehow get the
         // type calculation wrong above it is better to just return nothing
         // than to assert or crash.
-        if (!copy_from_extractor)
-          return return_valobj_sp;
-        if (copy_from_offset + field_byte_width >
-            copy_from_extractor->GetByteSize())
-          return return_valobj_sp;
+          if (!copy_from_extractor)
+            return return_valobj_sp;
+          if (copy_from_offset + field_byte_width >
+              copy_from_extractor->GetByteSize())
+            return return_valobj_sp;
 
-        copy_from_extractor->CopyByteOrderedData(
-            copy_from_offset, field_byte_width,
-            data_sp->GetBytes() + field_byte_offset, field_byte_width,
-            byte_order);
-      }
+          copy_from_extractor->CopyByteOrderedData(
+              copy_from_offset, field_byte_width,
+              data_sp->GetBytes() + field_byte_offset, field_byte_width,
+              byte_order);
+        }
+      } 
 
       if (!is_memory) {
         // The result is in our data buffer.  Let's make a variable object out
@@ -2111,15 +2130,15 @@ ValueObjectSP ABISysV_x86_64::GetReturnValueObjectImpl(
       }
     }
 
-    // FIXME: This is just taking a guess, rax may very well no longer hold the
-    // return storage location.
-    // If we are going to do this right, when we make a new frame we should
-    // check to see if it uses a memory
-    // return, and if we are at the first instruction and if so stash away the
-    // return location.  Then we would
-    // only return the memory return value if we know it is valid.
+    // The SysV x86_64 ABI specifies that the return address for MEMORY
+    // objects be placed in rax on exit from the function.  However, the
+    // Swift variant of the ABI does not do that.  It passes the value in
+    // in rax, but relies on the caller knowing where it allocated the space
+    // on the way out.  Since rax is volatile, there's no way for me to recover
+    // the original value on the way out, so for Swift I can't reconstruct
+    // the return value from a MEMORY struct.
 
-    if (is_memory) {
+    if (is_memory && !is_swift_type) {
       unsigned rax_id =
           reg_ctx_sp->GetRegisterInfoByName("rax", 0)->kinds[eRegisterKindLLDB];
       lldb::addr_t storage_addr =
@@ -2198,52 +2217,16 @@ bool ABISysV_x86_64::RegisterIsVolatile(const RegisterInfo *reg_info) {
 // It's being revised & updated at https://github.com/hjl-tools/x86-psABI/
 
 bool ABISysV_x86_64::RegisterIsCalleeSaved(const RegisterInfo *reg_info) {
-  if (reg_info) {
-    // Preserved registers are :
-    //    rbx, rsp, rbp, r12, r13, r14, r15
-    //    mxcsr (partially preserved)
-    //    x87 control word
-
-    const char *name = reg_info->name;
-    if (name[0] == 'r') {
-      switch (name[1]) {
-      case '1': // r12, r13, r14, r15
-        if (name[2] >= '2' && name[2] <= '5')
-          return name[3] == '\0';
-        break;
-
-      default:
-        break;
-      }
-    }
-
-    // Accept shorter-variant versions, rbx/ebx, rip/ eip, etc.
-    if (name[0] == 'r' || name[0] == 'e') {
-      switch (name[1]) {
-      case 'b': // rbp, rbx
-        if (name[2] == 'p' || name[2] == 'x')
-          return name[3] == '\0';
-        break;
-
-      case 'i': // rip
-        if (name[2] == 'p')
-          return name[3] == '\0';
-        break;
-
-      case 's': // rsp
-        if (name[2] == 'p')
-          return name[3] == '\0';
-        break;
-      }
-    }
-    if (name[0] == 's' && name[1] == 'p' && name[2] == '\0') // sp
-      return true;
-    if (name[0] == 'f' && name[1] == 'p' && name[2] == '\0') // fp
-      return true;
-    if (name[0] == 'p' && name[1] == 'c' && name[2] == '\0') // pc
-      return true;
-  }
-  return false;
+  if (!reg_info)
+    return false;
+  assert(reg_info->name != nullptr && "unnamed register?");
+  std::string Name = std::string(reg_info->name);
+  bool IsCalleeSaved =
+      llvm::StringSwitch<bool>(Name)
+          .Cases("r12", "r13", "r14", "r15", "rbp", "ebp", "rbx", "ebx", true)
+          .Cases("rip", "eip", "rsp", "esp", "sp", "fp", "pc", true)
+          .Default(false);
+  return IsCalleeSaved;
 }
 
 void ABISysV_x86_64::Initialize() {

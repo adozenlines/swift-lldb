@@ -31,12 +31,14 @@ class TestSwiftGenericExpressions(lldbtest.TestBase):
 
     @decorators.skipIfLinux # <rdar://problem/30783388> test crashing sometimes when run on linux
     @decorators.swiftTest
+    @decorators.add_test_categories(["swiftpr"])
     def test_generic_expressions(self):
         """Test expressions in generic contexts"""
         self.build()
         self.do_test()
 
     @decorators.swiftTest
+    @decorators.add_test_categories(["swiftpr"])
     def test_ivars_in_generic_expressions(self):
         """Test ivar access through expressions in generic contexts"""
         self.build()
@@ -62,7 +64,7 @@ class TestSwiftGenericExpressions(lldbtest.TestBase):
     def do_test(self):
         """Test expressions in generic contexts"""
         exe_name = "a.out"
-        exe = os.path.join(os.getcwd(), exe_name)
+        exe = self.getBuildArtifact(exe_name)
 
         # Create the target
         target = self.dbg.CreateTarget(exe)
@@ -101,7 +103,7 @@ class TestSwiftGenericExpressions(lldbtest.TestBase):
     def do_ivar_test(self):
         """Test expressions in generic contexts"""
         exe_name = "a.out"
-        exe = os.path.join(os.getcwd(), exe_name)
+        exe = self.getBuildArtifact(exe_name)
 
         # Create the target
         target = self.dbg.CreateTarget(exe)

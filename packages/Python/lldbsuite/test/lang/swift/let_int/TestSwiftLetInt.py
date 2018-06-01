@@ -25,6 +25,7 @@ class TestSwiftLetIntSupport(TestBase):
     mydir = TestBase.compute_mydir(__file__)
 
     @decorators.swiftTest
+    @decorators.add_test_categories(["swiftpr"])
     def test_swift_let_int(self):
         """Test that a 'let' Int is formatted properly"""
         self.build()
@@ -38,7 +39,7 @@ class TestSwiftLetIntSupport(TestBase):
     def do_test(self):
         """Test that a 'let' Int is formatted properly"""
         exe_name = "a.out"
-        exe = os.path.join(os.getcwd(), exe_name)
+        exe = self.getBuildArtifact(exe_name)
 
         # Create the target
         target = self.dbg.CreateTarget(exe)
@@ -67,6 +68,16 @@ class TestSwiftLetIntSupport(TestBase):
         var = self.frame.FindVariable("y")
         lldbutil.check_variable(self, let, False, value="10")
         lldbutil.check_variable(self, var, False, value="10")
+
+        get_arguments = False
+        get_locals = True
+        get_statics = False
+        get_in_scope_only = True
+        local_vars = self.frame.GetVariables(get_arguments, get_locals,
+                                             get_statics, get_in_scope_only)
+        self.assertTrue(local_vars.GetFirstValueByName("x").IsValid())
+        self.assertTrue(local_vars.GetFirstValueByName("y").IsValid())
+        self.assertTrue(not local_vars.GetFirstValueByName("z").IsValid())
 
 if __name__ == '__main__':
     import atexit

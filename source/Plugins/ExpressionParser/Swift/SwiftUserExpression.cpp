@@ -18,7 +18,6 @@
 #include "SwiftExpressionParser.h"
 #include "SwiftREPLMaterializer.h"
 
-#include "lldb/Core/Log.h"
 #include "lldb/Core/Module.h"
 #include "lldb/Expression/DiagnosticManager.h"
 #include "lldb/Expression/ExpressionParser.h"
@@ -31,6 +30,7 @@
 #include "lldb/Symbol/VariableList.h"
 #include "lldb/Target/SwiftLanguageRuntime.h"
 #include "lldb/Utility/LLDBAssert.h"
+#include "lldb/Utility/Log.h"
 
 #include "swift/AST/Type.h"
 #include "swift/AST/Types.h"
@@ -50,12 +50,32 @@ SwiftUserExpression::SwiftUserExpression(
     : LLVMUserExpression(exe_scope, expr, prefix, language, desired_type,
                          options),
       m_type_system_helper(*m_target_wp.lock().get()),
-      m_result_delegate(*this, false), m_error_delegate(*this, true),
+      m_result_delegate(exe_scope.CalculateTarget(), *this, false),
+      m_error_delegate(exe_scope.CalculateTarget(), *this, true),
       m_persistent_variable_delegate(*this) {}
 
 SwiftUserExpression::~SwiftUserExpression() {}
 
-void SwiftUserExpression::ScanContext(ExecutionContext &exe_ctx, Error &err) {
+void SwiftUserExpression::WillStartExecuting() {
+  if (auto process = m_jit_process_wp.lock()) {
+    if (auto *swift_runtime = process->GetSwiftLanguageRuntime())
+      swift_runtime->WillStartExecutingUserExpression();
+    else
+      llvm_unreachable("Can't execute a swift expression without a runtime");
+  } else
+    llvm_unreachable("Can't execute an expression without a process");
+}
+
+void SwiftUserExpression::DidFinishExecuting() {
+  if (auto process = m_jit_process_wp.lock()) {
+    if (auto swift_runtime = process->GetSwiftLanguageRuntime())
+      swift_runtime->DidFinishExecutingUserExpression();
+    else
+      llvm_unreachable("Can't execute a swift expression without a runtime");
+  }
+}
+
+void SwiftUserExpression::ScanContext(ExecutionContext &exe_ctx, Status &err) {
   Log *log(lldb_private::GetLogIfAllCategoriesSet(LIBLLDB_LOG_EXPRESSIONS));
 
   if (log)
@@ -106,7 +126,8 @@ void SwiftUserExpression::ScanContext(ExecutionContext &exe_ctx, Error &err) {
     // we need to make sure the Target's SwiftASTContext has been setup BEFORE
     // we do any Swift name lookups
     if (m_target) {
-      SwiftASTContext *swift_ast_ctx = m_target->GetScratchSwiftASTContext(err);
+      SwiftASTContext *swift_ast_ctx = m_target->GetScratchSwiftASTContext(
+          err, *frame);
       if (!swift_ast_ctx) {
         if (log)
           log->Printf("  [SUE::SC] NULL Swift AST Context");
@@ -208,7 +229,7 @@ void SwiftUserExpression::ScanContext(ExecutionContext &exe_ctx, Error &err) {
 
           swift::Type object_type =
               swift::Type((swift::TypeBase *)(self_type.GetOpaqueQualType()))
-                  ->getLValueOrInOutObjectType();
+                  ->getWithoutSpecifierType();
 
           if (object_type.getPointer() &&
               (object_type.getPointer() != self_type.GetOpaqueQualType()))
@@ -263,11 +284,8 @@ void SwiftUserExpression::ScanContext(ExecutionContext &exe_ctx, Error &err) {
             log->Printf("  [SUE::SC] Class generic arguments:");
 
           for (size_t ai = 0, ae = num_template_args; ai != ae; ++ai) {
-            lldb::TemplateArgumentKind template_arg_kind;
-
             CompilerType template_arg_type =
-                self_type.GetTemplateArgument(ai, template_arg_kind);
-
+                self_type.GetGenericArgumentType(ai);
             ConstString template_arg_name = template_arg_type.GetTypeName();
 
             if (log)
@@ -294,11 +312,8 @@ void SwiftUserExpression::ScanContext(ExecutionContext &exe_ctx, Error &err) {
 
           for (size_t ai = 0, ae = self_unbound_type.GetNumTemplateArguments();
                ai != ae; ++ai) {
-            lldb::TemplateArgumentKind template_arg_kind;
-
             CompilerType template_arg_type =
-                self_unbound_type.GetTemplateArgument(ai, template_arg_kind);
-
+                self_unbound_type.GetGenericArgumentType(ai);
             ConstString template_arg_name = template_arg_type.GetTypeName();
 
             if (log)
@@ -320,82 +335,15 @@ void SwiftUserExpression::ScanContext(ExecutionContext &exe_ctx, Error &err) {
         } while (0);
       }
     }
-
-    do {
-      ConstString function_name =
-          sym_ctx.GetFunctionName(Mangled::ePreferMangled);
-
-      if (function_name.IsEmpty())
-        break;
-
-      if (log)
-        log->Printf("  [SUE::SC] Function name: %s", function_name.AsCString());
-
-      Error get_type_error;
-      SwiftASTContext *ast_context = llvm::dyn_cast_or_null<SwiftASTContext>(
-          sym_ctx.module_sp->GetTypeSystemForLanguage(
-              lldb::eLanguageTypeSwift));
-      if (!ast_context || ast_context->HasFatalErrors())
-        break;
-
-      CompilerType function_type = ast_context->GetTypeFromMangledTypename(
-          function_name.AsCString(), get_type_error);
-
-      if (get_type_error.Fail() || !function_type.IsValid())
-        break;
-
-      if (log && function_type.GetNumTemplateArguments())
-        log->Printf("  [SUE::SC] Function generic arguments:");
-
-      for (size_t ai = 0, ae = function_type.GetNumTemplateArguments();
-           ai != ae; ++ai) {
-        lldb::TemplateArgumentKind template_arg_kind;
-
-        CompilerType template_arg_type =
-            function_type.GetTemplateArgument(ai, template_arg_kind);
-
-        ConstString template_arg_name = template_arg_type.GetTypeName();
-
-        if (log)
-          log->Printf("    [SUE::SC] Argument name: %s",
-                      template_arg_name.AsCString());
-
-        CompilerType concrete_type =
-            exe_ctx.GetProcessRef().GetSwiftLanguageRuntime()->GetConcreteType(
-                frame, template_arg_name);
-
-        lldbassert(concrete_type.IsValid());
-
-        if (!concrete_type.IsValid()) {
-          if (log)
-            log->Printf(
-                "  [SUE::SC] Concrete type of generic parameter is invalid");
-
-          continue;
-        }
-
-        if (log)
-          log->Printf("    [SUE::SC] Argument type: %s",
-                      concrete_type.GetTypeName().AsCString());
-
-        const char *name = template_arg_name.AsCString();
-
-        bool found = false;
-
-        for (const SwiftGenericInfo::Binding &binding :
-             m_swift_generic_info.class_bindings) {
-          if (binding.name == name) {
-            found = true;
-            break;
-          }
-        }
-
-        if (!found)
-          m_swift_generic_info.function_bindings.push_back(
-              {name, concrete_type});
-      }
-    } while (0);
   }
+}
+
+static SwiftPersistentExpressionState *
+GetPersistentState(Target *target, ExecutionContext &exe_ctx) {
+  auto exe_scope = exe_ctx.GetBestExecutionContextScope();
+  if (!exe_scope)
+    return nullptr;
+  return target->GetSwiftPersistentExpressionState(*exe_scope);
 }
 
 bool SwiftUserExpression::Parse(DiagnosticManager &diagnostic_manager,
@@ -406,25 +354,22 @@ bool SwiftUserExpression::Parse(DiagnosticManager &diagnostic_manager,
                                 uint32_t line_offset) {
   Log *log(lldb_private::GetLogIfAllCategoriesSet(LIBLLDB_LOG_EXPRESSIONS));
 
-  Error err;
+  Status err;
 
   InstallContext(exe_ctx);
-
-  if (Target *target = exe_ctx.GetTargetPtr()) {
-    if (PersistentExpressionState *persistent_state =
-            target->GetPersistentExpressionStateForLanguage(
-                lldb::eLanguageTypeSwift)) {
-      m_result_delegate.RegisterPersistentState(persistent_state);
-      m_error_delegate.RegisterPersistentState(persistent_state);
-    } else {
-      diagnostic_manager.PutString(
-          eDiagnosticSeverityError,
-          "couldn't start parsing (no persistent data)");
-      return false;
-    }
+  Target *target = exe_ctx.GetTargetPtr();
+  if (!target) {
+    diagnostic_manager.PutString(eDiagnosticSeverityError,
+                                 "couldn't start parsing (no target)");
+    return false;
+  }
+  if (auto *persistent_state = GetPersistentState(target, exe_ctx)) {
+    persistent_state->AddHandLoadedModule(ConstString("Swift"));
+    m_result_delegate.RegisterPersistentState(persistent_state);
+    m_error_delegate.RegisterPersistentState(persistent_state);
   } else {
     diagnostic_manager.PutString(eDiagnosticSeverityError,
-                                  "couldn't start parsing (no target)");
+                                 "couldn't start parsing (no persistent data)");
     return false;
   }
 
@@ -461,17 +406,6 @@ bool SwiftUserExpression::Parse(DiagnosticManager &diagnostic_manager,
 
   if (log)
     log->Printf("Parsing the following code:\n%s", m_transformed_text.c_str());
-
-  ////////////////////////////////////
-  // Set up the target and compiler
-  //
-
-  Target *target = exe_ctx.GetTargetPtr();
-
-  if (!target) {
-    diagnostic_manager.PutString(eDiagnosticSeverityError, "invalid target\n");
-    return false;
-  }
 
   //////////////////////////
   // Parse the expression
@@ -510,17 +444,20 @@ bool SwiftUserExpression::Parse(DiagnosticManager &diagnostic_manager,
     exe_scope = exe_ctx.GetTargetPtr();
   } while (0);
 
-  std::unique_ptr<ExpressionParser> parser(
-      new SwiftExpressionParser(exe_scope, *this, m_options));
+  m_parser =
+      llvm::make_unique<SwiftExpressionParser>(exe_scope, *this, m_options);
 
-  unsigned num_errors = parser->Parse(
-      diagnostic_manager, first_body_line, 
+  unsigned error_code = m_parser->Parse(
+      diagnostic_manager, first_body_line,
       first_body_line + source_code->GetNumBodyLines(), line_offset);
 
-  if (num_errors) {
+  if (error_code == 2) {
+    m_fixed_text = m_expr_text;
+    return false;
+  } else if (error_code) {
     // Calculate the fixed expression string at this point:
     if (diagnostic_manager.HasFixIts()) {
-      if (parser->RewriteExpression(diagnostic_manager)) {
+      if (m_parser->RewriteExpression(diagnostic_manager)) {
         size_t fixed_start;
         size_t fixed_end;
         const std::string &fixed_expression =
@@ -534,12 +471,10 @@ bool SwiftUserExpression::Parse(DiagnosticManager &diagnostic_manager,
     return false;
   }
 
-  //////////////////////////////////////////////////////////////////////////////////////////
-  // Prepare the output of the parser for execution, evaluating it statically if
-  // possible
-  //
 
-  Error jit_error = parser->PrepareForExecution(
+  // Prepare the output of the parser for execution, evaluating it statically if
+  // possible.
+  Status jit_error = m_parser->PrepareForExecution(
       m_jit_start_addr, m_jit_end_addr, m_execution_unit_sp, exe_ctx,
       m_can_interpret, execution_policy);
 
@@ -568,9 +503,7 @@ bool SwiftUserExpression::Parse(DiagnosticManager &diagnostic_manager,
       // execution
       // unit to determine whether it needs to live in the process.
 
-      llvm::cast<SwiftPersistentExpressionState>(
-          exe_ctx.GetTargetPtr()->GetPersistentExpressionStateForLanguage(
-              lldb::eLanguageTypeSwift))
+      GetPersistentState(exe_ctx.GetTargetPtr(), exe_ctx)
           ->RegisterExecutionUnit(m_execution_unit_sp);
     }
   }
@@ -622,7 +555,7 @@ bool SwiftUserExpression::AddArguments(ExecutionContext &exe_ctx,
 
     ConstString object_name("self");
 
-    Error object_ptr_error;
+    Status object_ptr_error;
 
     object_ptr = GetObjectPointer(frame_sp, object_name, object_ptr_error);
 
@@ -680,9 +613,8 @@ lldb::ExpressionVariableSP SwiftUserExpression::GetResultAfterDematerialization(
     lldb::TargetSP target_sp = exe_scope->CalculateTarget();
 
     if (target_sp) {
-      if (PersistentExpressionState *persistent_state =
-              target_sp->GetPersistentExpressionStateForLanguage(
-                  lldb::eLanguageTypeSwift)) {
+      if (auto *persistent_state =
+              target_sp->GetSwiftPersistentExpressionState(*exe_scope)) {
         if (error_is_valid) {
           persistent_state->RemovePersistentVariable(in_result_sp);
           result_sp = in_error_sp;
@@ -699,11 +631,14 @@ lldb::ExpressionVariableSP SwiftUserExpression::GetResultAfterDematerialization(
 }
 
 SwiftUserExpression::ResultDelegate::ResultDelegate(
-    SwiftUserExpression &user_expression, bool is_error)
-    : m_user_expression(user_expression), m_is_error(is_error) {}
+    lldb::TargetSP target, SwiftUserExpression &user_expression, bool is_error)
+    : m_target_sp(target), m_user_expression(user_expression),
+      m_is_error(is_error) {}
 
 ConstString SwiftUserExpression::ResultDelegate::GetName() {
-  return m_persistent_state->GetNextPersistentVariableName(m_is_error);
+  auto prefix = m_persistent_state->GetPersistentVariablePrefix(m_is_error);
+  return m_persistent_state->GetNextPersistentVariableName(*m_target_sp,
+                                                           prefix);
 }
 
 void SwiftUserExpression::ResultDelegate::DidDematerialize(

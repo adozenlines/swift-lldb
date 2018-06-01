@@ -110,12 +110,21 @@ public:
   //------------------------------------------------------------------
   lldb::addr_t StartAddress() { return m_jit_start_addr; }
 
+  //------------------------------------------------------------------
+  /// Called to notify the expression that it is about to be executed.
+  //------------------------------------------------------------------
+  virtual void WillStartExecuting() {}
+
+  //------------------------------------------------------------------
+  /// Called to notify the expression that its execution has finished.
+  //------------------------------------------------------------------
+  virtual void DidFinishExecuting() {}
+
   struct SwiftGenericInfo {
     struct Binding {
       const char *name;
       CompilerType type;
     };
-    llvm::SmallVector<Binding, 3> function_bindings;
     llvm::SmallVector<Binding, 3> class_bindings;
   };
 

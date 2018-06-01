@@ -14,8 +14,8 @@
 
 #include "SwiftASTManipulator.h"
 
-#include "lldb/Core/Log.h"
 #include "lldb/Symbol/CompilerType.h"
+#include "lldb/Utility/Log.h"
 
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILBasicBlock.h"
@@ -42,7 +42,8 @@ swift::SILValue SwiftSILManipulator::emitLValueForVariable(
   swift::SILArgument *struct_argument = nullptr;
 
   for (swift::SILArgument *argument : entry_block.getArguments()) {
-    swift::Identifier argument_name = argument->getDecl()->getName();
+    swift::Identifier argument_name = argument->getDecl()->getBaseName()
+                                        .getIdentifier();
 
     if (!strcmp(argument_name.get(), SwiftASTManipulator::GetArgumentName())) {
       struct_argument = argument;
